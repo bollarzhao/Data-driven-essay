@@ -1,0 +1,1159 @@
+---
+title: "Is Toronto the Only City Where Young Adults Face High Housing Pressure?Evidence from Canadian Cities (2016–2021)"
+author: "Ziyan(Bollar) Zhao, Shencen Cai"
+output: html_document
+---
+
+```{=html}
+<style type="text/css">
+  body{
+  font-size: 12pt;
+}
+</style>
+```
+
+```{r setup, include=FALSE}
+ # install.packages("survey")
+ #install.packages("ggrepel")
+ #install.packages("tidyverse")
+# install.packages("sf")
+# install.packages("geojsonsf")
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+
+library(geojsonsf)
+library(jsonlite)
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(tidyverse)
+library(survey)
+library(plotly)
+library(ggrepel)
+library(sf)
+library(scales)
+library(stringr)
+library(htmlwidgets)
+library(htmltools)
+library(crosstalk)
+
+
+wmean <- function(x, w) {
+  ok <- is.finite(x) & !is.na(x) & is.finite(w) & !is.na(w) & w > 0
+  sum(x[ok] * w[ok]) / sum(w[ok])
+}
+
+wquantile <- function(x, w, probs = c(0.1, 0.5, 0.9)) {
+  ok <- is.finite(x) & is.finite(w) & !is.na(x) & !is.na(w) & w > 0
+  x <- x[ok]; w <- w[ok]
+  if (length(x) == 0) return(rep(NA_real_, length(probs)))
+  o <- order(x)
+  x <- x[o]; w <- w[o]
+  cw <- cumsum(w) / sum(w)
+  sapply(probs, function(p) x[which(cw >= p)[1]])
+}
+```
+
+```{r}
+#data preparation
+need_cols <- c("CMA", "AGEGRP", "HDGREE", "TotInc", "SHELCO", "HCORENEED_IND", "WEIGHT")
+
+c16 <- fread("census_16_metro.csv", select = need_cols, showProgress = FALSE)
+c21 <- fread("census_21_metro.csv", select = need_cols, showProgress = FALSE)
+
+c16$Year <- 2016
+c21$Year <- 2021
+
+census <- bind_rows(c16, c21)
+```
+
+```{r}
+#data cleaning
+young <- census %>%
+  filter(AGEGRP %in% c(9, 10)) %>%
+  mutate(
+    TotInc_clean = case_when(
+      TotInc < 0 ~ NA_real_,
+      TotInc >= 9999999 ~ NA_real_,
+      TRUE ~ as.numeric(TotInc)
+    ),
+    SHELCO_clean = case_when(
+      SHELCO < 0 ~ NA_real_,
+      TRUE ~ as.numeric(SHELCO)
+    ),
+    HCN_clean = case_when(
+      HCORENEED_IND == 888 ~ NA_real_,
+      TRUE ~ as.numeric(HCORENEED_IND)
+    ),
+    AnnualShelter = SHELCO_clean * 12,
+    Burden = AnnualShelter / TotInc_clean,
+    Burden30 = ifelse(is.finite(Burden) & TotInc_clean > 10000 & Burden > 0.30, 1, 0),
+    BachelorPlus = ifelse(HDGREE >= 9 & HDGREE <= 13,1,0),
+    City = case_when(
+      CMA == 205 ~ "Halifax",
+      CMA == 399 ~ "Kingston",
+      CMA == 421 ~ "Greater Sudbury",
+      CMA == 462 ~ "Montreal",
+      CMA == 499 ~ "Sherbrooke",
+      CMA == 505 ~ "Ottawa-Gatineau",
+      CMA == 532 ~ "Oshawa",
+      CMA == 535 ~ "Toronto",
+      CMA == 537 ~ "Hamilton",
+      CMA == 539 ~ "St. Catharines-Niagara",
+      CMA == 541 ~ "Kitchener-Cambridge-Waterloo",
+      CMA == 555 ~ "London",
+      CMA == 559 ~ "Windsor",
+      CMA == 577 ~ "Barrie",
+      CMA == 588 ~ "Brantford",
+      CMA == 599 ~ "Guelph",
+      CMA == 602 ~ "Winnipeg",
+      CMA == 799 ~ "Regina",
+      CMA == 825 ~ "Calgary",
+      CMA == 835 ~ "Edmonton",
+      CMA == 933 ~ "Vancouver",
+      CMA == 935 ~ "Victoria",
+      CMA == 988 ~ "Kelowna",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  filter(
+    City != "Other",
+    WEIGHT > 0,
+    !is.na(TotInc_clean),
+    !is.na(SHELCO_clean)
+  )
+```
+
+```{r}
+metro_clean <- young %>%
+  mutate(
+    TotInc = ifelse(TotInc >= 9999999, NA, TotInc),
+    HCORENEED_IND = ifelse(HCORENEED_IND == 888, NA, HCORENEED_IND)
+  ) %>%
+  filter(
+    AGEGRP %in% c(9,10),
+    TotInc >0, SHELCO >= 0
+  )
+
+# to prevent extreme high incomes from affecting ratios, trim the top 1%
+metro_clean <- metro_clean %>%
+  filter(TotInc < quantile(TotInc, 0.99, na.rm = TRUE))
+
+#uncomment the following line to see the summary table of the cleaned data
+#summary(metro_clean)
+```
+
+```{r, include=FALSE}
+young %>%
+  summarise(
+    n = n(),
+    miss_income = sum(is.na(TotInc_clean)),
+    miss_shelter = sum(is.na(SHELCO_clean)),
+    miss_hcn = sum(is.na(HCN_clean)),
+    miss_weight = sum(is.na(WEIGHT))
+  )
+```
+
+```{r summaries, message=FALSE, warning=FALSE, include=FALSE}
+young %>%
+  summarise(
+    mean_income = weighted.mean(TotInc_clean, WEIGHT, na.rm = TRUE),
+    median_income = median(TotInc_clean, na.rm = TRUE),
+    mean_shelter = weighted.mean(SHELCO_clean, WEIGHT, na.rm = TRUE),
+    burden_rate = weighted.mean(Burden30, WEIGHT, na.rm = TRUE)
+  )
+```
+
+```{r}
+# data preparation for EDA
+burden_city <- young %>%
+  group_by(City, Year) %>%
+  summarise(
+    burden_rate = wmean(Burden30, WEIGHT),
+    mean_income = wmean(TotInc_clean, WEIGHT),
+    mean_monthly_shelter = wmean(SHELCO_clean, WEIGHT),
+    mean_annual_shelter = wmean(AnnualShelter, WEIGHT),
+    median_burden = wquantile(Burden, WEIGHT, 0.5)[1],
+    mean_shelter = weighted.mean(SHELCO_clean, WEIGHT, na.rm = TRUE),
+    p90_burden = wquantile(Burden, WEIGHT, 0.9)[1],
+    pop_weight = sum(WEIGHT, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+burden_year <- young %>%
+  group_by(Year) %>%
+  summarise(
+    burden_rate = weighted.mean(Burden30, WEIGHT, na.rm = TRUE),
+    mean_income = weighted.mean(TotInc_clean, WEIGHT, na.rm = TRUE),
+    mean_shelter = weighted.mean(SHELCO_clean, WEIGHT, na.rm = TRUE)
+  )
+```
+
+```{r, include=FALSE}
+# EDA 1: distribution of housing burden
+ggplot(young %>% filter(Burden >= 0, Burden < 5), aes(Burden)) +
+  geom_histogram(bins = 60, fill = "steelblue") +
+  geom_vline(xintercept = 0.30, color = "red", linetype = "dashed") +
+  labs(
+    title = "Distribution of Housing Cost Burden (Age 25–34)",
+    x = "Shelter Cost / Income",
+    y = "Count"
+  )
+
+ggplot(young %>% filter(Burden >=0, Burden <5),
+       aes(x = Burden, fill = factor(Year))) +
+  geom_density(alpha = 0.4) +
+  geom_vline(xintercept = 0.30, linetype = "dashed") +
+  labs(
+    title = "Distribution of Housing Burden Over Time",
+    x = "Shelter Cost / Income",
+    fill = "Year"
+  )
+```
+
+```{r, include=FALSE}
+# EDA 2: housing burden among young adults by city
+ggplot(burden_city,
+       aes(x = reorder(City, burden_rate), y = burden_rate, fill = factor(Year))) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  scale_y_continuous(labels = percent_format()) +
+  labs(
+    title = "Housing Cost Burden Among Young Adults by City",
+    x = NULL,
+    y = "Share spending >30% of income",
+    fill = "Year"
+  )
+```
+
+```{r,include=FALSE}
+#EDA 3: housing burden vs. mean income by city
+ggplot(burden_city, aes(x = mean_income, y = burden_rate, color = factor(Year))) +
+  geom_point(size = 3) +
+  geom_text_repel(aes(label = City), size = 3) +
+  scale_y_continuous(labels = percent_format()) +
+  labs(
+    title = "Housing Cost Burden vs. Mean Income by City",
+    x = "Mean Total Income (CAD)",
+    y = "Share spending >30% of income",
+    color = "Year"
+  )
+```
+
+```{r,include=FALSE}
+#EDA 4: average shelter cost by city
+rent_city <- young %>%
+  group_by(City, Year) %>%
+  summarise(
+    mean_shelter = weighted.mean(SHELCO_clean, WEIGHT)
+  )
+
+ggplot(rent_city,
+       aes(x = reorder(City, mean_shelter), y = mean_shelter, fill = factor(Year))) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  labs(
+    title = "Average Shelter Costs by City",
+    x = NULL,
+    y = "Monthly Shelter Cost"
+  )
+```
+
+In Canada, housing has become one of the biggest financial challenges for many young adults. In cities across the country, rents and housing costs have risen steadily in cities in recent years, raising concerns about whether incomes are keeping pace with the costs of living.
+
+For young adults aged 25 to 34, this issue is particularly important. At this stage of life, many people are entering the workforce, beginning independent living, and trying to build their financial foundation. When housing expenses take up a large share of income, it can affect savings, influence employment choices, and even determine whether people can remain in a city long-term.
+
+Researchers often use a simple benchmark to measure housing affordability. Households that spend **more than 30% of their income on housing** are typically considered to face housing stress (Canada Mortgage and Housing Corporation, 2018). This threshold provides a useful way to compare housing pressure across different places.
+
+Using data from the [**2016**](https://odesi.ca/en/details?id=/odesi/doi__10-5683_SP3_XYEZYH.xml)(Statistics Canada, 2016) **and [2021](https://odesi.ca/en/details?id=/odesi/doi__10-5683_SP3_UIHWYC.xml)**(Statistics Canada, 2021) **Canadian Census (Statistics Canada)** to examine housing affordability among young adults aged **25** to **34** across major Canadian metropolitan areas. By comparing housing costs and incomes, we can see which cities experience the highest levels of housing pressure and how this pressure varies across metropolitan areas.
+
+#### **Where housing pressure among young adults is highest？**
+
+The map below shows the share of young adults in each metropolitan area who spend more than 30% of their income on housing.
+
+```{r}
+
+#city name
+cma_sf <- st_read("lcma000b16a_e/lcma000b16a_e.shp", quiet = TRUE) %>%
+  st_transform(4326) %>%
+  select(CMANAME, geometry)
+
+clean_name <- function(x) {
+  x %>%
+    str_trim() %>%
+    str_squish()
+}
+
+cma_sf2 <- cma_sf %>%
+  mutate(CMANAME = clean_name(CMANAME))
+
+burden_city2 <- burden_city %>%
+  mutate(
+    CMANAME = clean_name(City),
+    CMANAME = recode(
+      CMANAME,
+      "Greater Sudbury" = "Greater Sudbury / Grand Sudbury",
+      "Kitchener-Cambridge-Waterloo" = "Kitchener - Cambridge - Waterloo",
+      "Montreal" = "Montréal",
+      "Ottawa-Gatineau" = "Ottawa - Gatineau (Ontario part / partie de l'Ontario)",
+      "St. Catharines-Niagara" = "St. Catharines - Niagara"
+    )
+  )
+
+sf_2016 <- cma_sf2 %>%
+  left_join(burden_city2 %>% filter(Year == 2016), by = "CMANAME") %>%
+  filter(!is.na(burden_rate))
+
+sf_2021 <- cma_sf2 %>%
+  left_join(burden_city2 %>% filter(Year == 2021), by = "CMANAME") %>%
+  filter(!is.na(burden_rate))
+
+sf_2016_fixed <- sf_2016 %>%
+  st_make_valid()
+
+sf_2016_s <- sf_2016_fixed %>%
+  st_simplify(dTolerance = 1000)
+
+sf_2021_fixed <- sf_2021 %>%
+  st_make_valid()
+
+sf_2021_s <- sf_2021_fixed %>%
+  st_simplify(dTolerance = 1000)
+
+tmp2016 <- tempfile(fileext = ".geojson")
+tmp2021 <- tempfile(fileext = ".geojson")
+
+sf::st_write(sf_2016_s, tmp2016, delete_dsn = TRUE, quiet = TRUE)
+sf::st_write(sf_2021_s, tmp2021, delete_dsn = TRUE, quiet = TRUE)
+
+geojson_2016 <- jsonlite::fromJSON(tmp2016, simplifyVector = FALSE)
+geojson_2021 <- jsonlite::fromJSON(tmp2021, simplifyVector = FALSE)
+```
+
+```{r}
+# ── 1. Build hover text ──────────────────────────────────────────────
+map_2016 <- sf_2016_s %>%
+  st_drop_geometry() %>%
+  mutate(
+    hover_text = paste0(
+      "<b>", CMANAME, "</b>",
+      "<br>Year: 2016",
+      "<br>Share facing housing pressure: ", percent(burden_rate, accuracy = 0.1),
+      "<br>Typical annual income: ",          dollar(mean_income),
+      "<br>Typical monthly housing cost: ",   dollar(mean_shelter)
+    )
+  )
+
+map_2021 <- sf_2021_s %>%
+  st_drop_geometry() %>%
+  mutate(
+    hover_text = paste0(
+      "<b>", CMANAME, "</b>",
+      "<br>Year: 2021",
+      "<br>Share facing housing pressure: ", percent(burden_rate, accuracy = 0.1),
+      "<br>Typical annual income: ",          dollar(mean_income),
+      "<br>Typical monthly housing cost: ",   dollar(mean_shelter)
+    )
+  )
+
+# ── 1. Toronto centroid ──────────────────────────────────────────────
+toronto_2021 <- sf_2021_s %>%
+  filter(CMANAME == "Toronto") %>%
+  st_centroid() %>%
+  st_transform(4326)
+
+toronto_coords <- st_coordinates(toronto_2021)
+toronto_lon <- as.numeric(toronto_coords[1, 1])
+toronto_lat <- as.numeric(toronto_coords[1, 2])
+
+# ── 2. Shared z range ────────────────────────────────────────────────
+z_min <- min(c(map_2016$burden_rate, map_2021$burden_rate), na.rm = TRUE)
+z_max <- max(c(map_2016$burden_rate, map_2021$burden_rate), na.rm = TRUE)
+
+# ── 3. Custom colorscale: low=yellow, high=dark red ──────────────────
+custom_scale <- list(
+  list(0,   "#ffffb2"),
+  list(0.25, "#fecc5c"),
+  list(0.5,  "#fd8d3c"),
+  list(0.75, "#f03b20"),
+  list(1,    "#bd0026")   # darkest red = highest pressure
+)
+
+# ── 4. Build map ─────────────────────────────────────────────────────
+fig_map <- plot_ly() %>%
+
+  # Trace 1 — 2016 choropleth
+  add_trace(
+    type         = "choroplethmapbox",
+    geojson      = geojson_2016,
+    locations    = map_2016$CMANAME,
+    z            = map_2016$burden_rate,
+    featureidkey = "properties.CMANAME",
+    text         = map_2016$hover_text,
+    hoverinfo    = "text",
+    colorscale   = custom_scale,
+    zmin         = z_min,
+    zmax         = z_max,
+    marker       = list(line = list(color = "white", width = 1.2)),
+    visible      = TRUE,
+    showscale    = TRUE,
+    colorbar     = list(
+      title      = list(text = "Housing<br>Pressure", font = list(size = 12)),
+      tickformat = ".0%",
+      thickness  = 18,
+      len        = 0.5,
+      y          = 0.45
+    )
+  ) %>%
+
+  # Trace 2 — 2021 choropleth
+  add_trace(
+    type         = "choroplethmapbox",
+    geojson      = geojson_2021,
+    locations    = map_2021$CMANAME,
+    z            = map_2021$burden_rate,
+    featureidkey = "properties.CMANAME",
+    text         = map_2021$hover_text,
+    hoverinfo    = "text",
+    colorscale   = custom_scale,
+    zmin         = z_min,
+    zmax         = z_max,
+    marker       = list(line = list(color = "white", width = 1.2)),
+    visible      = FALSE,
+    showscale    = FALSE
+  ) %>%
+
+  # Trace 3 — Toronto dot + label (always visible)
+  add_trace(
+    type         = "scattermapbox",
+    mode         = "markers+text",
+    lon          = list(toronto_lon),
+    lat          = list(toronto_lat),
+    text         = list("Toronto"),
+    textposition = "top right",
+    textfont     = list(color = "#B22222", size = 13, family = "Arial Bold"),
+    marker       = list(size = 9, color = "#B22222", opacity = 1),
+    showlegend   = FALSE,
+    inherit      = FALSE,
+    visible      = TRUE
+  ) %>%
+
+  layout(
+    title = list(
+      text = "<b>Housing Pressure Among Young Adults — 2016</b><br><sup>Share spending >30% of income on housing, by Canadian metropolitan area</sup>",
+      x    = 0.05,
+      font = list(size = 15)
+    ),
+    mapbox = list(
+      style  = "carto-positron",
+      zoom   = 3.0,                        # zoom out to show all of Canada
+      center = list(lon = -80, lat = 56)   # center on Canada
+    ),
+    margin = list(l = 0, r = 0, t = 80, b = 30),
+
+    updatemenus = list(
+      list(
+        type        = "buttons",
+        direction   = "right",
+        x           = 0.05,
+        y           = 1.01,
+        bgcolor     = "#f0f0f0",
+        bordercolor = "#cccccc",
+        font        = list(size = 13),
+        buttons = list(
+          list(
+            method = "update",
+            args   = list(
+              list(visible = list(TRUE, FALSE, TRUE)),
+              list(title = list(
+                text = "<b>Housing Pressure Among Young Adults — 2016</b><br><sup>Share spending >30% of income on housing, by Canadian metropolitan area</sup>"
+              ))
+            ),
+            label = "2016"
+          ),
+          list(
+            method = "update",
+            args   = list(
+              list(visible = list(FALSE, TRUE, TRUE)),
+              list(title = list(
+                text = "<b>Housing Pressure Among Young Adults — 2021</b><br><sup>Share spending >30% of income on housing, by Canadian metropolitan area</sup>"
+              ))
+            ),
+            label = "2021"
+          )
+        )
+      )
+    ),
+
+    annotations = list(
+      list(
+        x         = 0.5, y = -0.02,
+        xref      = "paper", yref = "paper",
+        text      = "Darker red = larger share of young adults spending more than 30% of income on housing.",
+        showarrow = FALSE,
+        align     = "center",
+        font      = list(size = 11, color = "gray40")
+      )
+    )
+  )
+
+fig_map
+```
+
+Housing pressure among young adults varies significantly across metropolitan areas in Canada. In some cities, only a relatively small share of young adults spend more than 30% of their income on housing. In others, the proportion is much higher. Darker areas on the map represent cities where a larger share of young adults face housing pressure.
+
+Several metropolitan areas in Ontario rank among the most housing burdened, with Toronto standing out in particular. A significant share of young adults there spend more than 30% of their income on housing, which is commonly used as a threshold for housing pressure.
+
+However, housing pressure is not limited to Toronto or a few major cities. Young adults in several other metropolitan areas across Canada also face relatively high housing burdens. This suggests that housing affordability challenges among young adults is not confined to a single city but is a broader phenomenon affecting multiple urban regions.
+
+Therefore, these patterns reflect housing pressure at only one point in time. To better understand whether affordability conditions have worsened, it is necessary to examine how housing pressure has changed across Canadian cities between 2016 and 2021.
+
+#### **Housing pressure rose in most Canadian cities from 2016 to 2021**
+
+```{r}
+#Visualization 2
+change_city <- burden_city %>%
+  select(City, Year, burden_rate) %>%
+  pivot_wider(
+    names_from = Year,
+    values_from = burden_rate,
+    names_prefix = "y"
+  ) %>%
+  mutate(
+    change_pp = 100 * (y2021 - y2016)
+  ) %>%
+  arrange(y2021) %>%
+  mutate(City = factor(City, levels = City))
+
+fig2 <- plot_ly() %>%
+  add_segments(
+    data     = change_city,
+    x        = ~y2016,
+    xend     = ~y2021,
+    y        = ~City,
+    yend     = ~City,
+    line     = list(color = "rgba(120,120,120,0.45)", width = 2),
+    hoverinfo = "none",
+    showlegend = FALSE
+  ) %>%
+  add_markers(
+    data = change_city,
+    x    = ~y2016,
+    y    = ~City,
+    marker = list(
+      size  = 9,
+      color = ifelse(change_city$City == "Toronto", "#D84B4B", "#F28E8B")
+    ),
+    customdata    = ~paste0(
+      "City: ", City,
+      "<br>2016 share facing housing pressure: ", percent(y2016, accuracy = 0.1),
+      "<br>2021 share facing housing pressure: ", percent(y2021, accuracy = 0.1),
+      "<br>Change: ", sprintf("%+.1f", change_pp), " percentage points"
+    ),
+    hovertemplate = "%{customdata}<extra></extra>",
+    name = "2016"
+  ) %>%
+  add_markers(
+    data = change_city,
+    x    = ~y2021,
+    y    = ~City,
+    marker = list(
+      size  = 9,
+      color = ifelse(change_city$City == "Toronto", "#D84B4B", "#18B7BE")
+    ),
+    customdata    = ~paste0(
+      "City: ", City,
+      "<br>2016 share facing housing pressure: ", percent(y2016, accuracy = 0.1),
+      "<br>2021 share facing housing pressure: ", percent(y2021, accuracy = 0.1),
+      "<br>Change: ", sprintf("%+.1f", change_pp), " percentage points"
+    ),
+    hovertemplate = "%{customdata}<extra></extra>",
+    name = "2021"
+  ) %>%
+  layout(
+    # title moved up with enough room for legend below it
+    title = list(
+      text = "<b>Housing pressure rose in most cities between 2016 and 2021</b>",
+      x    = 0.5,
+      xanchor = "center",
+      font = list(size = 14),
+      pad  = list(b = 10)
+    ),
+    xaxis = list(
+      title      = "Share spending more than 30% of income on housing",
+      tickformat = ".0%",
+      titlefont  = list(size = 12)
+    ),
+    yaxis = list(
+      title     = "",
+      tickfont  = list(size = 11),
+      automargin = TRUE          # prevents city names from being cut off
+    ),
+    # legend placed BELOW title, well clear of it
+    legend = list(
+      orientation = "h",
+      x           = 0.5,
+      xanchor     = "center",
+      y           = 1.0,         # just below the title
+      yanchor     = "bottom",
+      font        = list(size = 12)
+    ),
+    # extra top margin so title + legend don't compress the plot
+    margin = list(l = 10, r = 20, t = 100, b = 50)
+  )
+
+fig2
+```
+
+Housing pressure among young adults increased in many Canadian cities between 2016 and 2021. In most metropolitan areas, a larger share of young adults were spending **more than 30 percent** of their income on housing in 2021 than five years earlier.
+
+The increase was especially noticeable in several Ontario cities, including *Oshawa, Brantford,* and *Kitchener–Cambridge–Waterloo*, where the proportion of young adults facing housing pressure rose substantially during this period.
+
+Toronto already had one of the highest levels of housing pressure in 2016, and the share increased further by 2021. This pattern suggests that housing affordability challenges are not limited to the largest housing markets but are also affecting nearby urban areas.
+
+So why did housing pressure increased in so many Canadian cities?
+
+#### **Comparing income growth and housing cost growth helps explain why housing pressure changed differently across cities.**
+
+```{r}
+# Visualization 3
+growth_city <- burden_city %>%
+  select(City, Year, mean_income, mean_shelter) %>%
+  pivot_wider(
+    names_from = Year,
+    values_from = c(mean_income, mean_shelter)
+  ) %>%
+  mutate(
+    income_growth = (mean_income_2021 - mean_income_2016) / mean_income_2016,
+    shelter_growth = (mean_shelter_2021 - mean_shelter_2016) / mean_shelter_2016,
+    highlight = ifelse(City == "Toronto", "Toronto", "Other"),
+    label = ifelse(City == "Toronto", "Toronto", "")
+  )
+
+max_val <- max(c(growth_city$income_growth, growth_city$shelter_growth))
+
+fig_growth <- plot_ly(
+  growth_city,
+  x = ~income_growth,
+  y = ~shelter_growth,
+  type = "scatter",
+  mode = "markers+text",
+  text = ~label,
+  textposition = "top center",
+  color = ~highlight,
+  colors = c("Other" = "#8ecae6", "Toronto" = "#d84b4b"),
+  marker = list(size = 10),
+  hovertext = ~paste0(
+    "<b>", City, "</b>",
+    "<br>Income growth: ", percent(income_growth, accuracy = 0.1),
+    "<br>Housing cost growth: ", percent(shelter_growth, accuracy = 0.1)
+  ),
+  hoverinfo = "text"
+) %>%
+layout(
+  title = "In most cities, housing costs grew faster than incomes",
+  
+  xaxis = list(
+    title = "Income growth (2016–2021)",
+    tickformat = ".0%"
+  ),
+  
+  yaxis = list(
+    title = "Housing cost growth (2016–2021)",
+    tickformat = ".0%"
+  ),
+  
+  shapes = list(
+    
+    # equality line
+    list(
+      type = "line",
+      x0 = 0, y0 = 0,
+      x1 = max_val, y1 = max_val,
+      line = list(
+        dash = "dash",
+        color = "gray50",
+        width = 2
+      )
+    )
+    
+  ),
+  
+  annotations = list(
+    
+    list(
+      x = max_val*0.75,
+      y = max_val*0.85,
+      text = "Above the line:<br>Housing costs grew faster",
+      showarrow = FALSE,
+      font = list(size = 12, color = "gray30")
+    ),
+    
+    list(
+      x = max_val*0.75,
+      y = max_val*0.55,
+      text = "Below the line:<br>Income grew faster",
+      showarrow = FALSE,
+      font = list(size = 12, color = "gray30")
+    )
+    
+  )
+)
+
+fig_growth
+```
+
+Income and housing costs did not grow at the same pace across all Canadian cities between 2016 to 2021. The chart compares the growth rate of income with the growth rate of housing costs in each city. Cities above the diagonal line experienced faster increases in housing costs than incomes, while those below the line saw incomes grow faster than housing costs.
+
+In several cities, including **Toronto**, income growth slightly exceeded housing cost growth. However, this does not necessarily mean that housing became affordable for young adults. Even when incomes grow faster than housing costs, affordability pressures can remain high if housing expenses already take up a large share of income.
+
+This highlights an important limitation of looking only at growth rates. Even small changes in costs or income can matter if households are already spending a large proportion of their income on housing.
+
+To better understand this pressure, it is useful to look at how close young adults are to the 30 percent housing affordability threshold.
+
+```{r}
+# Visualization 4
+dist_city <- young %>%
+  filter(Burden >= 0, Burden < 5)
+
+# 2. Weighted density helper
+weighted_density_df <- function(data, city_name, year_value, n = 512) {
+  d <- data %>%
+    filter(City == city_name, Year == year_value)
+
+  dens <- density(
+    x = d$Burden,
+    weights = d$WEIGHT / sum(d$WEIGHT, na.rm = TRUE),
+    from = 0,
+    to = 5,
+    n = n
+  )
+
+  tibble(
+    City = city_name,
+    Year = year_value,
+    burden = dens$x,
+    density = dens$y
+  )
+}
+
+# 3. Build density data for all cities
+city_list <- sort(unique(dist_city$City))
+
+density_all <- bind_rows(
+  lapply(city_list, function(ct) weighted_density_df(dist_city, ct, 2016)),
+  lapply(city_list, function(ct) weighted_density_df(dist_city, ct, 2021))
+)
+
+# 4. Choose default city
+default_city <- "Toronto"
+
+# 5. Create interactive plot
+fig_dist <- plot_ly()
+
+for (ct in city_list) {
+  
+  d2016 <- density_all %>% filter(City == ct, Year == 2016)
+  d2021 <- density_all %>% filter(City == ct, Year == 2021)
+  
+  fig_dist <- fig_dist %>%
+    add_lines(
+      data = d2016,
+      x = ~burden,
+      y = ~density,
+      name = "2016",
+      visible = (ct == default_city),
+      line = list(color = "#F4A6A3", width = 3),
+      hovertemplate = paste0(
+        "<b>", ct, "</b>",
+        "<br>Year: 2016",
+        "<br>Share of income spent on housing: %{x:.2f}",
+        "<br>Density: %{y:.2f}",
+        "<extra></extra>"
+      ),
+      showlegend = (ct == default_city)
+    ) %>%
+    add_lines(
+      data = d2021,
+      x = ~burden,
+      y = ~density,
+      name = "2021",
+      visible = (ct == default_city),
+      line = list(color = "#18B7BE", width = 3),
+      hovertemplate = paste0(
+        "<b>", ct, "</b>",
+        "<br>Year: 2021",
+        "<br>Share of income spent on housing: %{x:.2f}",
+        "<br>Density: %{y:.2f}",
+        "<extra></extra>"
+      ),
+      showlegend = (ct == default_city)
+    )
+}
+
+# 6. Visibility logic for dropdown
+visibility_list <- lapply(seq_along(city_list), function(i) {
+  v <- rep(FALSE, length(city_list) * 2)
+  v[(2*i - 1):(2*i)] <- TRUE
+  v
+})
+
+buttons <- lapply(seq_along(city_list), function(i) {
+  list(
+    method = "update",
+    args = list(
+      list(visible = visibility_list[[i]]),
+      list(
+        title = paste0(
+          "How housing pressure is distributed among young adults in ", city_list[i]
+        )
+      )
+    ),
+    label = city_list[i]
+  )
+})
+
+# 7. Final layout
+fig_dist <- fig_dist %>%
+  layout(
+    title = paste0(
+      "How housing pressure is distributed among young adults in ", default_city
+    ),
+    xaxis = list(
+      title = "Share of income spent on housing",
+      range = c(0, 5)
+    ),
+    yaxis = list(
+      title = "Density"
+    ),
+    updatemenus = list(
+      list(
+        type = "dropdown",
+        x = 1.02,
+        y = 1,
+        xanchor = "left",
+        buttons = buttons
+      )
+    ),
+    shapes = list(
+      list(
+        type = "line",
+        x0 = 0.30, x1 = 0.30,
+        y0 = 0, y1 = 1,
+        yref = "paper",
+        line = list(color = "red", dash = "dash", width = 2)
+      )
+    ),
+    annotations = list(
+      list(
+        x = 0.30,
+        y = 0.95,
+        yref = "paper",
+        text = "30% affordability line",
+        showarrow = FALSE,
+        font = list(color = "red", size = 11)
+      ),
+      list(
+        x = 0.98,
+        y = 0.92,
+        xref = "paper",
+        yref = "paper",
+        text = "Select a city",
+        showarrow = FALSE,
+        font = list(size = 12, color = "gray35")
+      )
+    ),
+    legend = list(
+      orientation = "h",
+      x = 0.35,
+      y = 1.08
+    )
+  )
+
+fig_dist
+```
+
+City-level averages do not always capture how housing pressure is experienced within a city. Even when a city’s overall housing burden appears moderate, individual households may face very different levels of affordability pressure.
+
+The interactive chart shows how the **share of income spent on housing** is distributed among young adults within each city. The **pink curve represents the distribution in 2016**, while the **blue curve shows the distribution in 2021**. The **dashed red line marks the commonly used affordability threshold of 30 percent**, meaning households that spend more than 30 percent of their income on housing are typically considered to face housing stress.
+
+In many cities, a large share of young adults cluster between **20 and 30 percent of income spent on housing**, indicating that many households already devote a substantial portion of their income to housing. Because so many young adults are close to this level, even relatively small increases in housing costs can push more households into housing stress.
+
+Use the menu to explore different cities and compare how housing pressure is distributed across metropolitan areas. While the overall patterns appear similar, the position and shape of the distributions reveal important differences in housing affordability across cities.
+
+This also raises an important question: **does housing pressure affect all young adults equally?**
+
+#### **A degree can help — but it doesn’t shield young adults from housing pressure**
+
+```{r}
+# Visualization 5
+edu_gap_city <- young %>%
+  mutate(
+    Education = ifelse(
+      BachelorPlus == 1,
+      "Bachelor's degree or higher",
+      "No bachelor's degree"
+    )
+  ) %>%
+  group_by(City, Year, Education) %>%
+  summarise(
+    burden_rate = weighted.mean(Burden30, WEIGHT, na.rm = TRUE),
+    mean_shelter = weighted.mean(SHELCO_clean, WEIGHT, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  select(City, Year, Education, burden_rate) %>%
+  pivot_wider(
+    names_from = Education,
+    values_from = burden_rate
+  ) %>%
+  rename(
+    burden_bachelor = `Bachelor's degree or higher`,
+    burden_no_bachelor = `No bachelor's degree`
+  ) %>%
+  mutate(
+    education_gap = burden_no_bachelor - burden_bachelor
+  ) %>%
+  left_join(
+    burden_city %>% select(City, Year, burden_rate, mean_shelter),
+    by = c("City", "Year")
+  ) %>%
+  mutate(
+    highlight = ifelse(City == "Toronto", "Toronto", "Other"),
+    label = ifelse(City == "Toronto", "Toronto", "")
+  )
+
+fig_edu_gap <- plot_ly(
+  data = edu_gap_city,
+  x = ~burden_rate,
+  y = ~education_gap,
+  frame = ~Year,
+  type = "scatter",
+  mode = "markers+text",
+  text = ~label,
+  textposition = "top center",
+  color = ~highlight,
+  colors = c("Other" = "#8ecae6", "Toronto" = "#d84b4b"),
+  size = ~mean_shelter,
+  sizes = c(10, 30),
+  hovertext = ~paste0(
+    "<b>", City, "</b>",
+    "<br>Overall housing pressure: ", percent(burden_rate, accuracy = 0.1),
+    "<br>Education gap: ", percent(education_gap, accuracy = 0.1),
+    "<br>Bachelor's degree or higher: ", percent(burden_bachelor, accuracy = 0.1),
+    "<br>No bachelor's degree: ", percent(burden_no_bachelor, accuracy = 0.1),
+    "<br>Typical monthly housing cost: ", dollar(mean_shelter)
+  ),
+  hoverinfo = "text"
+) %>%
+  layout(
+    title = "In some cities, education offers more protection than in others",
+    xaxis = list(
+      title = "Overall share facing housing pressure",
+      tickformat = ".0%"
+    ),
+    yaxis = list(
+      title = "Education Gap(bachelor vs non-bachelor)",
+      tickformat = ".0%"
+    )
+  ) %>%
+  animation_opts(1000, easing = "cubic-in-out") %>%
+  animation_slider(currentvalue = list(prefix = "Year: "))
+
+fig_edu_gap
+```
+
+Housing pressure does not affect all young adults in the same way. One factor that may shape who experiences housing stress is **education**.
+
+The chart compares overall housing pressure in each city with the gap between young adults **with and without a bachelor’s degree**. Points above the horizontal line indicate cities where young adults without a degree face higher housing pressure than those with one.
+
+Across many Canadian cities, young adults without a bachelor’s degree are more likely to experience housing stress. However, the size of this gap varies across metropolitan areas. In some cities the difference is relatively small, while in others education appears to offer a stronger buffer against housing pressure.
+
+Toronto stands out for having one of the highest overall levels of housing pressure. Even though young adults with a bachelor’s degree tend to face slightly lower housing stress, the overall level of pressure remains high compared with many other cities.
+
+Looking across 2016 and 2021, the gap between education groups remains visible in many cities, suggesting that housing affordability pressure interact with broader socioeconomic differences.
+
+#### **Pick a city and explore how income and housing costs shape affordability**
+
+Housing pressure does not look the same in every city. Use the interactive panel below to explore how housing affordability differs across Canadian metropolitan areas.
+
+Select a city to see several dimensions of housing pressure at once: how the share of young adults facing housing burden changed between 2016 and 2021, how monthly shelter costs relate to income, and how housing costs are distributed relative to income.
+
+Exploring different cities reveals that housing costs often rise alongside income, but not always at the same pace. In many places, the share of young adults spending more than 30 percent of their income on housing increased over time.
+
+Because the chart combines several indicators in one view, it allows readers to compare patterns across cities and see how housing pressure can emerge from the interaction between income, housing costs, and affordability thresholds.
+
+```{r, fig.width=12}
+shared_city <- SharedData$new(
+  burden_city %>% mutate(City = as.character(City)),
+  key = ~City,
+  group = "cities"
+)
+dist_df <- young %>%
+  filter(Burden >= 0, Burden < 5) %>%
+  group_by(City, Year) %>%
+  mutate(weight_share = WEIGHT / sum(WEIGHT, na.rm = TRUE)) %>%
+  ungroup()
+shared_dist <- SharedData$new(
+  dist_df,
+  key = ~City,
+  group = "cities"
+)
+
+# chart A: burden rate by year - changed to scatter+line to reduce clutter
+p_a <- plot_ly(
+  shared_city,
+  x = ~factor(Year),
+  y = ~burden_rate,
+  color = ~City,
+  type = "scatter",
+  mode = "markers+lines",
+  colors = "Set2",
+  hovertemplate = paste0(
+    "<b>%{customdata}</b>",
+    "<br>Year: %{x}",
+    "<br>Burden rate: %{y:.1%}",
+    "<extra></extra>"
+  ),
+  customdata = ~City,
+  showlegend = FALSE
+) %>%
+  layout(
+    title = list(text = "Housing Burden by Year", font = list(size = 13)),
+    xaxis = list(title = "", tickfont = list(size = 11)),
+    yaxis = list(
+      title = "Burden Rate",
+      tickformat = ".0%",
+      tickfont = list(size = 11),
+      titlefont = list(size = 12)
+    ),
+    margin = list(l = 60, r = 20, t = 40, b = 40)
+  )
+
+# chart B: income vs shelter - larger markers, better axis formatting
+p_b <- plot_ly(
+  shared_city,
+  x = ~mean_income,
+  y = ~mean_shelter,
+  type = "scatter",
+  mode = "markers+text",
+  text = ~ifelse(City == "Toronto", City, ""),
+  textposition = "top center",
+  marker = list(size = 13, opacity = 0.8, color = "#4e79a7"),
+  hovertemplate = paste0(
+    "<b>%{customdata}</b>",
+    "<br>Income: %{x:$,.0f}",
+    "<br>Monthly shelter: %{y:$,.0f}",
+    "<extra></extra>"
+  ),
+  customdata = ~City
+) %>%
+  layout(
+    title = list(text = "Income vs Shelter Cost", font = list(size = 13)),
+    xaxis = list(
+      title = "Mean Annual Income",
+      tickformat = "$,.0f",
+      tickangle = -30,
+      tickfont = list(size = 10),
+      titlefont = list(size = 12)
+    ),
+    yaxis = list(
+      title = "Mean Monthly Shelter Cost",
+      tickformat = "$,.0f",
+      tickfont = list(size = 10),
+      titlefont = list(size = 12)
+    ),
+    margin = list(l = 70, r = 20, t = 40, b = 60)
+  )
+
+dist_df <- young %>%
+  filter(Burden >= 0, Burden < 5) %>%
+  group_by(City, Year) %>%
+  mutate(weight_share = WEIGHT / sum(WEIGHT, na.rm = TRUE)) %>%
+  ungroup()
+shared_dist <- SharedData$new(
+  dist_df,
+  key = ~City,
+  group = "cities"
+)
+
+# chart C: burden histogram - unchanged logic, better labels
+p_c <- plot_ly(
+  shared_dist,
+  x = ~Burden,
+  color = ~factor(Year),
+  colors = c("#f28e8b", "#18b7be"),
+  type = "histogram",
+  opacity = 0.6,
+  nbinsx = 40
+) %>%
+  layout(
+    title = list(text = "Burden Distribution", font = list(size = 13)),
+    barmode = "overlay",
+    xaxis = list(
+      title = "Shelter Cost / Income",
+      tickfont = list(size = 10),
+      titlefont = list(size = 12)
+    ),
+    yaxis = list(
+      title = "Count",
+      tickfont = list(size = 10),
+      titlefont = list(size = 12)
+    ),
+    legend = list(title = list(text = "Year"), font = list(size = 11)),
+    shapes = list(
+      list(
+        type = "line",
+        x0 = 0.30, x1 = 0.30,
+        y0 = 0, y1 = 1,
+        xref = "x", yref = "paper",
+        line = list(color = "red", dash = "dash", width = 2)
+      )
+    ),
+    margin = list(l = 60, r = 20, t = 40, b = 50)
+  )
+
+# layout: stack charts vertically for more breathing room
+bscols(
+  widths = c(2, 10),
+  div(
+    style = "padding:10px",
+    tags$h4("Explore Cities"),
+    filter_select(
+      id    = "city_filter",
+      label = "Select a city",
+      sharedData = shared_city,
+      group = ~City
+    )
+  ),
+  bscols(widths = c(4, 4, 4), p_a, p_b, p_c)
+)
+```
+
+## Conclusion
+
+Housing affordability has become a growing challenge for young adults in many Canadian cities. Between 2016 and 2021, the proportion of young adults spending more than 30% of their income on housing increased across many metropolitan areas. Rising housing costs, often growing faster than income, are making housing increasingly difficult for young adults to afford.
+
+However, these results should be interpreted with caution. The figures rely on citywide summaries and only two census years, which may hide important differences within cities and miss shorter-term changes in housing markets. More detailed neighborhood data or more frequent observations could provide a clearer picture of how housing pressure changes over time.
+
+Even with these limitations, the patterns suggest that housing affordability is becoming a more widespread issue for young adults. Addressing it will likely require a lot of policies, including expanding housing supply and increasing access to affordable housing options.
+
+## Methodology
+
+This analysis uses confidential micro-data from the 2016 and 2021 Canadian Censuses to examine housing affordability among young adults across Canadian metropolitan areas. The sample is restricted to individuals aged 25-34 living in Census Metropolitan Areas (CMAs).
+
+Several variables from the census micro-data are used in the analysis. CMA identifies the metropolitan area and is mapped to the corresponding city name. Total income (**TotInc**) measures annual individual income in Canadian dollars, while shelter costs (**Shelco**) capture annual housing expenses. To assess housing affordability, a housing burden measure is constructed as the ratio of shelter costs to income. Following common housing research practice, individuals spending more than 30% of their income on housing are considered to face housing affordability pressure.
+
+Special census codes indicating missing or invalid responses (e.g. 9999999 for income and 888 for core housing need) are treated as missing values. All estimates are calculated using the survey weights provided in the census micro-data to produce population-representative results. When proportions are reported, 95% confidence intervals are computed using Wilson score methods adapted for weighted survey data.
+
+This approach allows the analysis to compare housing pressure across cities and to examine how the relationship between income, housing costs, and affordability changed between 2016 and 2021.
+
+## References
+
+Canada Mortgage and Housing Corporation. (2018). *Affordable housing in Canada*. <https://www.cmhc-schl.gc.ca/professionals/industry-innovation-and-leadership/industry-expertise/affordable-housing/about-affordable-housing/affordable-housing-in-canada>
+
+Statistics Canada. (2024). Housing challenges related to affordability, adequacy, condition and discrimination. <https://www150.statcan.gc.ca/n1/daily-quotidien/241119/dq241119b-eng.htm>
+
+Statistics Canada, 2023, "2021 Census of Population [Canada] Public Use Microdata File (PUMF): Individuals File", <https://doi.org/10.5683/SP3/UIHWYC>, Borealis, V7, UNF:6:4DaSfnDtAbe1lAYDJvWbag== [fileUNF]
+
+Statistics Canada, 2023, "2016 Census of Population [Canada] Public Use Microdata File (PUMF): Individuals File", <https://doi.org/10.5683/SP3/XYEZYH>, Borealis, V2, UNF:6:Wr85Uf24dsXo/EMaCJA52Q== [fileUNF]
