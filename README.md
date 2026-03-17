@@ -1,46 +1,44 @@
 # 📊 Housing Affordability Analysis in Canadian Cities (2016–2021)
 ## 🚀 Project Overview
 
-This project analyzes housing affordability among young adults (ages 25–34) across major Canadian cities using 2016 and 2021 Census microdata.
+This project analyzes housing affordability among young adults (ages 25–34) across major Canadian Census Metropolitan Areas (CMAs) using 2016 and 2021 Census microdata.
 
-The goal is to evaluate whether Toronto is uniquely unaffordable or part of a broader national trend, and to identify the underlying drivers of housing pressure using data-driven evidence.
+Rather than focusing on individual cities alone, the analysis examines metropolitan-level housing systems, which better reflect labor markets, commuting patterns, and regional housing dynamics.
 
 ## 🎯 Key Business Question
 
-Is housing affordability pressure concentrated in Toronto, or is it a systemic issue across Canadian metropolitan areas?
+Is housing pressure concentrated in Toronto, or is it a broader issue across Canadian metropolitan areas?
 
-Housing pressure is defined as individuals spending more than 30% of their income on housing, a widely used affordability benchmark.
+Housing pressure is defined as spending more than 30% of income on housing, a standard affordability threshold.
 
 ## 📈 Key Insights
 
-Housing pressure is widespread across Canadian cities, not limited to Toronto
+- Housing pressure is not unique to Toronto — many CMAs show similarly high levels
 
-Most cities experienced an increase in housing burden from 2016 to 2021
+- Most CMAs experienced increasing housing burden from 2016 to 2021
 
-In many regions, housing costs grew faster than income, driving affordability issues
+- In many metropolitan areas, housing costs outpaced income growth, worsening affordability
 
-Even where income growth kept pace, high baseline costs still led to sustained pressure
+ - Even where income growth kept up, existing high cost levels sustained pressure
 
-Individuals without a bachelor’s degree are consistently more vulnerable to housing stress
+- Individuals without a bachelor’s degree are more likely to experience housing stress across CMAs
 
 ## 🧠 Analytical Approach
 ### Data
-
 Canadian Census Microdata (2016 & 2021)
 
-Population: Young adults aged 25–34
+**Population**: Young adults aged 25–34
 
-Geographic scope: Major Census Metropolitan Areas (CMAs)
+**Geographic** **unit**: Census Metropolitan Areas (CMAs)
 
 ### Feature Engineering
+**Housing burden ratio** = annual shelter cost / annual income
 
-Housing burden ratio = annual housing cost / annual income
+**Binary indicator**: burden > 30%
 
-Binary affordability indicator (>30% threshold)
+**Education grouping**: bachelor’s vs non-bachelor’s
 
-Education grouping (Bachelor’s vs Non-Bachelor’s)
-
-City-level aggregation with survey weights
+**Weighted aggregation** using survey weights
 
 ### Methods
 
@@ -56,15 +54,15 @@ Growth comparison (income vs housing costs)
 
 This project emphasizes data storytelling, using multiple complementary visualizations:
 
-Choropleth maps → geographic patterns of housing pressure
+**Choropleth maps → geographic patterns of housing pressure
 
 Scatter plots → relationship between income growth and housing cost growth
 
 Density plots → distribution of housing burden within cities
 
-Interactive dashboard → allows users to explore city-level differences
+Interactive dashboard(html file) → allows users to explore city-level differences
 
-The focus is not just on analysis, but on making insights interpretable and actionable.
+The focus is not just on analysis, but on making insights interpretable and actionable.**
 
 ## 🛠️ Tech Stack
 
@@ -74,9 +72,14 @@ Data visualization tools — for storytelling and interaction
 
 Census microdata processing — handling weighted survey data
 
+## 📌 Key Takeaway
+
+Housing affordability is a systemic issue across Canadian metropolitan areas, not just a Toronto-specific problem.
+The imbalance between income and housing costs is driving widespread housing pressure among young adults.
+
 ## ⚠️ Limitations
 
-Based on two time points (2016 & 2021) → limited temporal resolution
+ONLY Based on two time points (2016 & 2021) → limited temporal resolution
 
 Uses city-level aggregates, which may mask neighborhood-level variation
 
